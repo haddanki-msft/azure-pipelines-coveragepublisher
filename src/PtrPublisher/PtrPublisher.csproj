@@ -9,6 +9,7 @@
     <UseAppHost>false</UseAppHost>
     <AssemblyName>PtrPublisher</AssemblyName>
     <RootNamespace>PtrPublisher</RootNamespace>
+    <SatelliteResourceLanguages>en</SatelliteResourceLanguages>
   </PropertyGroup>
 
   <ItemGroup>

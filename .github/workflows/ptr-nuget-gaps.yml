@@ -1,0 +1,196 @@
+name: PtrPublisher .NET delivery gaps POC
+
+# Answers "bundle .NET or not" with evidence. Every job parses the same sample TRX with
+# --dry-run (no Azure DevOps access needed), so it can run on a fork without secrets.
+#   build        : framework-dependent (FDD) and self-contained (SCD) packages + sizes
+#   hosted       : FDD on GitHub-hosted Windows/Linux/macOS with no setup-dotnet step
+#   self-hosted  : clean Linux, non-root user, no .NET -> ensure-dotnet installs runtime
+#   no-icu       : clean Linux without libicu -> invariant globalization fallback
+#   offline      : .NET download servers blocked -> FDD fails clearly, SCD still works
+
+on:
+  push:
+    branches: [haddanki/ptr-nuget-console]
+    paths:
+      - 'src/PtrPublisher/**'
+      - 'tools/ptr-nuget/**'
+      - '.github/workflows/ptr-nuget-gaps.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  SAMPLE: src/PtrPublisher/samples/sample.trx
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Publish FDD (portable) and SCD (linux-x64)
+        run: |
+          set -euo pipefail
+          dotnet publish src/PtrPublisher -c Release -o out/fdd
+          dotnet publish src/PtrPublisher -c Release -r linux-x64 --self-contained -p:UseAppHost=true -o out/scd-linux-x64
+          mkdir -p pkg
+          tar -czf pkg/ptr-fdd.tar.gz -C out/fdd .
+          tar -czf pkg/ptr-scd-linux-x64.tar.gz -C out/scd-linux-x64 .
+          (cd out/fdd && zip -qr ../../pkg/ptr-fdd.zip .)
+          {
+            echo "### Package sizes"
+            echo "| Package | Files | Unpacked | Compressed |"
+            echo "|---|---|---|---|"
+            for d in fdd scd-linux-x64; do
+              echo "| $d | $(find out/$d -type f | wc -l) | $(du -sh out/$d | cut -f1) | $(du -h pkg/ptr-$d.tar.gz | cut -f1) |"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ptr-packages
+          path: pkg/*.tar.gz
+          retention-days: 7
+
+  hosted:
+    needs: build
+    name: hosted (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ptr-packages
+          path: pkg
+      - name: Preinstalled runtimes (no setup-dotnet)
+        shell: bash
+        run: dotnet --list-runtimes || echo "dotnet not on PATH"
+      - name: Ensure .NET 10 (Linux/macOS)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: bash tools/ptr-nuget/ensure-dotnet.sh
+      - name: Ensure .NET 10 (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./tools/ptr-nuget/ensure-dotnet.ps1
+      - name: Run FDD package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir app && tar -xzf pkg/ptr-fdd.tar.gz -C app
+          dn="${PTR_DOTNET//\\//}"
+          "$dn" app/PtrPublisher.dll --dry-run --file "$SAMPLE" 2>&1 | tail -n 8
+          echo "| ${{ matrix.os }} | $RUNNER_ARCH | $PTR_DOTNET_SOURCE | pass |" >> "$GITHUB_STEP_SUMMARY"
+
+  self-hosted:
+    needs: build
+    name: self-hosted sim (clean Linux, non-root)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    timeout-minutes: 15
+    steps:
+      - name: Runner prerequisites only (curl, CA certs, libicu)
+        run: |
+          apt-get update -qq && apt-get install -y -qq curl ca-certificates libicu74 >/dev/null
+          useradd -m -s /bin/bash runner
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ptr-packages
+          path: pkg
+      - name: Install .NET as non-root, run, rerun from cache
+        shell: bash
+        run: |
+          set -euo pipefail
+          work=/home/runner/work && mkdir -p $work/app && tar -xzf pkg/ptr-fdd.tar.gz -C $work/app
+          cp -r tools "$SAMPLE" $work/ && chown -R runner:runner /home/runner
+          command -v dotnet && { echo "unexpected: dotnet already present"; exit 1; } || true
+          su runner -c "set -euo pipefail; cd $work; unset GITHUB_ENV GITHUB_PATH
+            export PTR_DOTNET_DIR=/home/runner/tool-cache/ptr-dotnet
+            echo \"uid=\$(id -u)\"
+            start=\$(date +%s); out=\$(bash tools/ptr-nuget/ensure-dotnet.sh); echo \"\$out\"
+            dn=\$(echo \"\$out\" | sed -n 's/^PTR_DOTNET=//p'); echo \"first-run seconds: \$((\$(date +%s)-start))\"
+            \$dn app/PtrPublisher.dll --dry-run --file sample.trx 2>&1 | tail -n 8
+            start=\$(date +%s); bash tools/ptr-nuget/ensure-dotnet.sh; echo \"second-run seconds: \$((\$(date +%s)-start))\"
+            du -sh /home/runner/tool-cache/ptr-dotnet" | tee log.txt
+          {
+            echo "### Self-hosted simulation"
+            echo '```'; grep -E 'uid=|Installed in|first-run|second-run|cached|ptr-dotnet$|ParsedResults' log.txt || true; echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  no-icu:
+    needs: build
+    name: self-hosted sim (no libicu)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    timeout-minutes: 15
+    steps:
+      - name: curl and CA certs only
+        run: apt-get update -qq && apt-get install -y -qq curl ca-certificates >/dev/null
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ptr-packages
+          path: pkg
+      - name: Ensure .NET (expects invariant globalization)
+        shell: bash
+        run: bash tools/ptr-nuget/ensure-dotnet.sh
+      - name: Run FDD package
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=${DOTNET_SYSTEM_GLOBALIZATION_INVARIANT:-unset}"
+          mkdir app && tar -xzf pkg/ptr-fdd.tar.gz -C app
+          "$PTR_DOTNET" app/PtrPublisher.dll --dry-run --file "$SAMPLE" 2>&1 | tail -n 8
+
+  offline:
+    needs: build
+    name: self-hosted sim (no .NET download access)
+    runs-on: ubuntu-latest
+    container: ubuntu:24.04
+    timeout-minutes: 15
+    steps:
+      - name: Prerequisites, then block the .NET download servers
+        run: |
+          apt-get update -qq && apt-get install -y -qq curl ca-certificates libicu74 >/dev/null
+          for h in dot.net builds.dotnet.microsoft.com dotnetcli.azureedge.net dotnetcli.blob.core.windows.net \
+                   dotnetbuilds.azureedge.net ci.dot.net download.visualstudio.microsoft.com; do
+            echo "0.0.0.0 $h" >> /etc/hosts
+          done
+          if curl -fsS --max-time 10 https://dot.net/v1/dotnet-install.sh -o /dev/null; then echo "block failed"; exit 1; fi
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: ptr-packages
+          path: pkg
+      - name: FDD path must fail with a clear message
+        shell: bash
+        run: |
+          if bash tools/ptr-nuget/ensure-dotnet.sh; then echo "expected ensure-dotnet to fail"; exit 1; fi
+          echo "ensure-dotnet failed as expected."
+      - name: SCD package runs with no .NET installed
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v dotnet && { echo "unexpected: dotnet present"; exit 1; } || true
+          mkdir app && tar -xzf pkg/ptr-scd-linux-x64.tar.gz -C app
+          ./app/PtrPublisher --dry-run --file "$SAMPLE" 2>&1 | tail -n 8
+          echo "### Offline: FDD install blocked (expected), SCD ran without .NET" >> "$GITHUB_STEP_SUMMARY"
