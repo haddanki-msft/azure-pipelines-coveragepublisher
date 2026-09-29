@@ -1,0 +1,125 @@
+name: PtrPublisher (Ta NuGet console) POC
+
+# Validates the approach-7 publisher: a net10 console app that uses the Ta
+# Microsoft.TeamFoundation.PublishTestResults NuGet package on Windows, Linux and macOS.
+# Pull requests only build and parse (no Azure DevOps access). Publishing runs on the
+# trusted branch, whose ref is the subject of the existing federated credential.
+
+on:
+  pull_request:
+    branches: [kathans/gh-tcm-oidc-poc]
+    paths:
+      - 'src/PtrPublisher/**'
+      - '.github/workflows/ptr-nuget-console.yml'
+  push:
+    branches: [kathans/gh-tcm-oidc-poc]
+    paths:
+      - 'src/PtrPublisher/**'
+      - '.github/workflows/ptr-nuget-console.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ptr:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      # Reuse the existing verify-ado-auth POC identity and target.
+      CLIENT_ID: 5c299c5c-74de-4ce9-b943-98e12d31f858
+      TENANT_ID: 72f988bf-86f1-41af-91ab-2d7cd011db47
+      ADO_ORG_URL: https://dev.azure.com/tfspfcusctest
+      ADO_PROJECT: TestAI
+      CAN_PUBLISH: ${{ github.repository == 'microsoft/azure-pipelines-coveragepublisher' && github.ref == 'refs/heads/kathans/gh-tcm-oidc-poc' && github.event_name != 'pull_request' }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Report preinstalled .NET runtimes
+        run: dotnet --list-runtimes
+
+      - name: Set up .NET 7 (existing tests) and .NET 10 (publisher)
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            7.0.x
+            10.0.x
+
+      - name: Prepare isolated workspace
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP ("ptr-job-" + [guid]::NewGuid())
+          New-Item -ItemType Directory -Path $root | Out-Null
+          "PTR_WORK_DIR=$root" >> $env:GITHUB_ENV
+          "PTR_RESULTS_DIR=$(Join-Path $root 'TestResults')" >> $env:GITHUB_ENV
+          "PTR_APP_DIR=$(Join-Path $root 'app')" >> $env:GITHUB_ENV
+          "AZURE_CONFIG_DIR=$(Join-Path $root 'azure')" >> $env:GITHUB_ENV
+
+      - name: Build PtrPublisher (portable, framework-dependent)
+        run: dotnet publish src/PtrPublisher/PtrPublisher.csproj -c Release -o $env:PTR_APP_DIR
+
+      - name: Run tests and generate TRX
+        id: tests
+        continue-on-error: true
+        run: dotnet test src/CoveragePublisher.Tests/CoveragePublisher.Tests.csproj --logger trx --results-directory $env:PTR_RESULTS_DIR
+
+      - name: Parse TRX (dry run)
+        run: dotnet (Join-Path $env:PTR_APP_DIR 'PtrPublisher.dll') --dry-run --results-dir $env:PTR_RESULTS_DIR
+
+      - name: Sign in with existing federation
+        id: login
+        if: ${{ env.CAN_PUBLISH == 'true' }}
+        uses: azure/login@v2
+        with:
+          client-id: ${{ env.CLIENT_ID }}
+          tenant-id: ${{ env.TENANT_ID }}
+          audience: api://AzureADTokenExchange
+          allow-no-subscriptions: true
+
+      - name: Publish to Azure DevOps
+        id: publish
+        if: ${{ env.CAN_PUBLISH == 'true' && steps.login.outcome == 'success' }}
+        run: |
+          $token = az account get-access-token --resource 499b84ac-1321-427f-aa17-267ca6975798 --query accessToken --output tsv --only-show-errors
+          if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) { throw 'Failed to acquire the ADO access token.' }
+          Write-Host "::add-mask::$token"
+          $env:ADO_ACCESS_TOKEN = $token
+          try {
+            dotnet (Join-Path $env:PTR_APP_DIR 'PtrPublisher.dll') `
+              --collection-url $env:ADO_ORG_URL `
+              --project $env:ADO_PROJECT `
+              --results-dir $env:PTR_RESULTS_DIR `
+              --run-title "GitHub PtrPublisher $env:RUNNER_OS $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT" `
+              --platform "$env:RUNNER_OS-$env:RUNNER_ARCH"
+            if ($LASTEXITCODE -ne 0) { throw "PtrPublisher exited with $LASTEXITCODE." }
+          }
+          finally {
+            Remove-Item Env:ADO_ACCESS_TOKEN -ErrorAction SilentlyContinue
+            $token = $null
+          }
+
+      - name: Show published run
+        if: ${{ steps.publish.outcome == 'success' }}
+        run: |
+          "Run IDs: ${{ steps.publish.outputs.run-ids }}"
+          "Run URL: ${{ steps.publish.outputs.run-url }}"
+
+      - name: Remove per-job files and CLI cache
+        if: ${{ always() }}
+        run: |
+          if ($env:PTR_WORK_DIR -and (Test-Path -LiteralPath $env:PTR_WORK_DIR)) {
+            Remove-Item -LiteralPath $env:PTR_WORK_DIR -Recurse -Force
+          }
