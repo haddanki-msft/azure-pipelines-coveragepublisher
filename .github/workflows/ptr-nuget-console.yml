@@ -102,8 +102,7 @@ jobs:
               --collection-url $env:ADO_ORG_URL `
               --project $env:ADO_PROJECT `
               --results-dir $env:PTR_RESULTS_DIR `
-              --run-title "GitHub PtrPublisher $env:RUNNER_OS $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT" `
-              --platform "$env:RUNNER_OS-$env:RUNNER_ARCH"
+              --run-title "GitHub PtrPublisher $env:RUNNER_OS $env:GITHUB_RUN_ID attempt $env:GITHUB_RUN_ATTEMPT"
             if ($LASTEXITCODE -ne 0) { throw "PtrPublisher exited with $LASTEXITCODE." }
           }
           finally {
