@@ -36,8 +36,9 @@ if (files.Count == 0)
 Console.Error.WriteLine($"[ptr] {files.Count} {runner} file(s) found.");
 
 // GitHub has no ADO build: buildId 0 keeps the run build-less. Platform and configuration must stay
-// empty, because ADO rejects them without a build ID.
-var context = new TestRunContext(null, null, null, 0, null, null, null, runName, "GitHub Actions - PTR (JS action POC)");
+// empty, because ADO rejects them without a build ID. ADO stores TestRunSystem in 16 characters.
+const string TestRunSystem = "GitHubActions";
+var context = new TestRunContext(null, null, null, 0, null, null, null, runName, TestRunSystem);
 
 ITestResultParser parser = runner switch
 {
@@ -57,6 +58,24 @@ if (runData is null || runData.Count == 0)
 }
 var parsed = runData.Sum(r => r.TestResults?.Count ?? 0);
 Console.Error.WriteLine($"[ptr] parsed {parsed} result(s).");
+
+// Tags need a build or release, so the GitHub identity goes into the run comment in a
+// fixed key=value format that tools can parse. TestRunSystem marks the source.
+var server = Env("GITHUB_SERVER_URL", "https://github.com");
+var repo = Env("GITHUB_REPOSITORY", "local");
+var ghRunId = Env("GITHUB_RUN_ID", "0");
+var origin = string.Join("; ",
+    "source=GitHubActions",
+    $"repo={repo}",
+    $"workflow={Env("GITHUB_WORKFLOW")}",
+    $"job={Env("GITHUB_JOB")}",
+    $"runId={ghRunId}",
+    $"attempt={Env("GITHUB_RUN_ATTEMPT", "1")}",
+    $"ref={Env("GITHUB_REF")}",
+    $"sha={Env("GITHUB_SHA")}",
+    $"event={Env("GITHUB_EVENT_NAME")}",
+    $"runner={Env("RUNNER_ENVIRONMENT")}/{Env("RUNNER_OS")}-{Env("RUNNER_ARCH")}",
+    $"url={server}/{repo}/actions/runs/{ghRunId}");
 
 var summary = new Dictionary<string, object?> { ["runName"] = runName, ["runner"] = runner, ["parsedResults"] = parsed, ["dryRun"] = dryRun };
 var exitCode = 0;
@@ -85,9 +104,11 @@ if (!dryRun)
     var list = new List<object>();
     foreach (var run in runs)
     {
+        // RunCreateModel.Comment is read-only in Ta, so stamp the GitHub identity right after creation.
+        await client.UpdateTestRunAsync(new RunUpdateModel(comment: origin), project, run.Id);
         var r = await client.GetTestRunByIdAsync(project, run.Id);
         var url = $"{collectionUrl.AbsoluteUri.TrimEnd('/')}/{Uri.EscapeDataString(project)}/_testManagement/runs?runId={r.Id}&_a=runCharts";
-        list.Add(new { r.Id, r.State, r.TotalTests, r.PassedTests, r.NotApplicableTests, url });
+        list.Add(new { r.Id, r.State, r.TotalTests, r.PassedTests, r.NotApplicableTests, r.Comment, url });
         if (r.TotalTests != r.PassedTests + r.NotApplicableTests) exitCode = 2;
     }
     summary["runs"] = list;

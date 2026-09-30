@@ -26,7 +26,7 @@ contacting Azure DevOps. The token is only read from `ADO_ACCESS_TOKEN`, never f
 | 1 | Usage, parse, authentication or publish error |
 | 2 | Published, runs contain failures and `--fail-on-test-failure true` |
 
-The run is build-less (`buildId` 0) and tagged with `TestRunSystem = "GitHub Actions - PTR"`.
+The run is build-less (`buildId` 0) and tagged with `TestRunSystem = "GitHubActions"` (ADO keeps only 16 characters).
 On GitHub the app writes `run-ids`, `run-url` and `has-failures` to `GITHUB_OUTPUT`.
 
 ## POC findings

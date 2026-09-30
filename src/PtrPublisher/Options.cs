@@ -15,7 +15,7 @@ internal sealed class Options
     public string? RunTitle { get; private set; }
     public string? Platform { get; private set; }
     public string? Configuration { get; private set; }
-    public string TestRunSystem { get; private set; } = "GitHub Actions - PTR";
+    public string TestRunSystem { get; private set; } = "GitHubActions";
     public bool MergeResults { get; private set; } = true;
     public bool PublishRunAttachments { get; private set; } = true;
     public bool FailOnTestFailure { get; private set; }
@@ -84,7 +84,7 @@ internal sealed class Options
           --run-title <title>               Test run title
           --platform <value>                Build platform
           --configuration <value>           Build configuration
-          --test-run-system <value>         Source tag stored on the run (default: "GitHub Actions - PTR")
+          --test-run-system <value>         Source tag stored on the run (max 16 chars; default: "GitHubActions")
           --merge-results <bool>            Merge all files into one run (default: true)
           --publish-run-attachments <bool>  Upload result files as run attachments (default: true)
           --fail-on-test-failure <bool>     Exit 2 when published runs contain failures (default: false)
