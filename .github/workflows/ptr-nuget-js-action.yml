@@ -1,0 +1,73 @@
+name: PTR NuGet dummy JS action POC
+
+# POC: a JavaScript action that restores the Ta NuGet package at job time (dotnet run publish.cs)
+# instead of downloading a prebuilt zip. Measures the cold restore + compile time on each OS.
+# Publishing needs the federated credential, which trusts only the kathans/gh-tcm-oidc-poc ref
+# in the microsoft repo; elsewhere the action runs as a dry run.
+
+on:
+  push:
+    branches: [haddanki/ptr-nuget-console, kathans/gh-tcm-oidc-poc]
+    paths:
+      - '.github/actions/ptr-nuget-dummy/**'
+      - '.github/workflows/ptr-nuget-js-action.yml'
+      - 'src/PtrPublisher/samples/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  js-action:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CAN_PUBLISH: ${{ github.repository == 'microsoft/azure-pipelines-coveragepublisher' && github.ref == 'refs/heads/kathans/gh-tcm-oidc-poc' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: TRX via dummy action (cold NuGet restore)
+        id: trx
+        uses: ./.github/actions/ptr-nuget-dummy
+        with:
+          results-dir: src/PtrPublisher/samples
+          pattern: '*.trx'
+          test-runner: VSTest
+          dry-run: ${{ env.CAN_PUBLISH != 'true' }}
+          collection-url: https://dev.azure.com/tfspfcusctest
+          project: TestAI
+          run-title: PTR NuGet JS action POC - TRX - ${{ runner.os }} - ${{ github.run_id }}
+          client-id: 5c299c5c-74de-4ce9-b943-98e12d31f858
+          tenant-id: 72f988bf-86f1-41af-91ab-2d7cd011db47
+
+      - name: JUnit via dummy action (warm, same job)
+        id: junit
+        uses: ./.github/actions/ptr-nuget-dummy
+        with:
+          results-dir: src/PtrPublisher/samples
+          pattern: 'TEST-*.xml'
+          test-runner: JUnit
+          dry-run: ${{ env.CAN_PUBLISH != 'true' }}
+          collection-url: https://dev.azure.com/tfspfcusctest
+          project: TestAI
+          run-title: PTR NuGet JS action POC - JUnit - ${{ runner.os }} - ${{ github.run_id }}
+          client-id: 5c299c5c-74de-4ce9-b943-98e12d31f858
+          tenant-id: 72f988bf-86f1-41af-91ab-2d7cd011db47
+
+      - name: Report timings
+        shell: bash
+        run: |
+          echo "Cold restore + compile: ${{ steps.trx.outputs.setup-seconds }}s"
+          echo "Warm restore + compile: ${{ steps.junit.outputs.setup-seconds }}s"
+          echo "TRX run: ${{ steps.trx.outputs.run-url }}"
+          echo "JUnit run: ${{ steps.junit.outputs.run-url }}"
